@@ -1,4 +1,4 @@
-![My GIF](assets/robo.gif)
+![My GIF](asset/robo.gif)
 
 
 ## Wiring
