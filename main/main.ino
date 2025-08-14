@@ -12,7 +12,7 @@
 #define LED_PIN   38
 #define TOUCH_PIN 15
 
-// Use **hardware SPI** ctor (faster). We'll bind custom pins in setup() via SPI.begin().
+// Use hardware SPI ctor (faster). We'll bind pins via SPI.begin().
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 // --- Layout ---
@@ -25,6 +25,10 @@ const uint16_t EYE     = ST77XX_WHITE;
 const uint16_t PUPIL   = ST77XX_BLACK;
 const uint16_t MOUTH   = ST77XX_WHITE;
 
+// Love-eye pulse range (kept within eye area to avoid smear)
+const int LOVE_SCALE_MIN = 7;
+const int LOVE_SCALE_MAX = 10;  // <=10 fits eyeR=18 safely
+
 const int16_t headX=8, headY=8, headW=W-16, headH=H-16, headR=14;
 
 // Eyes (big)
@@ -36,13 +40,13 @@ const int16_t mouthX=50, mouthY=70, mouthW=60, mouthH=5, mouthR=5;
 // Happy by default (∪). If you want frown (∩), set to true.
 const bool MOUTH_FLIPPED_VERT = false;
 
-// --- Fast helpers ---
+// --- Helpers ---
 static inline void drawArc(int16_t cx,int16_t cy,int16_t radius,int16_t thickness,
                            int16_t startDeg,int16_t endDeg,uint16_t color){
   float inner = radius - thickness/2.0f;
   float outer = radius + thickness/2.0f;
   for (int a = startDeg; a <= endDeg; a++){
-    float rad = a * (3.1415926f/180.0f);
+    float rad = a * 3.1415926f/180.0f;
     int x0 = cx + (int)(inner * cosf(rad));
     int y0 = cy + (int)(inner * sinf(rad));
     int x1 = cx + (int)(outer * cosf(rad));
@@ -51,7 +55,32 @@ static inline void drawArc(int16_t cx,int16_t cy,int16_t radius,int16_t thicknes
   }
 }
 
-// Clear only the area that contains head + antenna (no full-screen wipe)
+void clearEyeBox(int16_t cx, int16_t cy, int M){
+  // Bounding box for the largest heart (scale M)
+  int16_t L  = cx - (2*M + 2);
+  int16_t T  = cy - ((3*M)/2 + 2);
+  int16_t Wb = 4*M + 4;
+  int16_t Hb = (7*M)/2 + 4;      // ≈ 3.5*M + 4
+
+  // Clip to screen
+  if (L < 0)      { Wb += L; L = 0; }
+  if (T < 0)      { Hb += T; T = 0; }
+  if (L + Wb > W) Wb = W - L;
+  if (T + Hb > H) Hb = H - T;
+
+  if (Wb > 0 && Hb > 0) tft.fillRect(L, T, Wb, Hb, FACE);
+}
+
+// draw heart shape (NO clearing inside!)
+void drawHeartAt(int16_t cx,int16_t cy,int scale,uint16_t color){
+  tft.fillCircle (cx - scale, cy - scale/2, scale, color);
+  tft.fillCircle (cx + scale, cy - scale/2, scale, color);
+  tft.fillTriangle(cx - scale*2, cy - scale/4,
+                   cx + scale*2, cy - scale/4,
+                   cx,            cy + scale*2, color);
+}
+
+// Clear only the head area (not full screen)
 void clearHeadArea(){
   int16_t padX = 6, padY = 12; // small margin
   tft.fillRect(headX - padX, headY - padY, headW + padX*2, headH + padY*2, BG);
@@ -67,6 +96,7 @@ void drawHeadRect(){
   tft.fillCircle(ax, headY-6, 3, OUTLINE);
 }
 
+// (kept for completeness; not used in love mode anymore)
 void drawHeadRound(){
   clearHeadArea();
   int cx=W/2, cy=H/2, r=min(W,H)/2 - 6;
@@ -117,34 +147,30 @@ void drawFace(bool eyesOpen, bool roundHead){
   drawSmile(MOUTH);
 }
 
-// Heart helper (updates only the eye’s region)
-void drawHeartAt(int16_t cx,int16_t cy,int scale,uint16_t color){
-  tft.fillCircle(cx, cy, eyeR+3, FACE); // clear eye region
-  tft.fillCircle(cx - scale, cy - scale/2, scale, color);
-  tft.fillCircle(cx + scale, cy - scale/2, scale, color);
-  tft.fillTriangle(cx - scale*2, cy - scale/4,
-                   cx + scale*2, cy - scale/4,
-                   cx, cy + scale*2, color);
-}
-
 // ---------- LOVE MODE: rectangular head + pulsing love eyes + happy mouth (4s) ----------
-// Only the head area boxes (eyes/mouth) are touched; no full-screen clears.
-void drawLoveEyesAnimatedRoundHead(){  // keep the same name to avoid changing other code
+void drawLoveEyesAnimatedRoundHead(){  // keeps rectangular head
   const uint16_t heartColor = ST77XX_RED;
   unsigned long start = millis();
 
-  // Ensure the rectangular head stays on screen
-  drawHeadRect(); // draw once; we'll only update eyes/mouth in the loop
+  // Draw rect head once; then update only eyes/mouth regions
+  drawHeadRect();
 
   while (millis() - start < 4000UL){
     float t = (millis() - start) / 200.0f;
-    int scale = 7 + (int)((sinf(t) + 1.0f) * 2.5f);  // 7..12 pulse
 
-    // Eyes (only repaint eye regions)
+    // Smooth pulse in [LOVE_SCALE_MIN .. LOVE_SCALE_MAX]
+    float u = (sinf(t) * 0.5f) + 0.5f;  // 0..1
+    int scale = LOVE_SCALE_MIN + (int)(u * (LOVE_SCALE_MAX - LOVE_SCALE_MIN) + 0.5f);
+
+    // 1) Clear eye boxes big enough for the largest heart every frame
+    clearEyeBox(eyeLX, eyeY, LOVE_SCALE_MAX);
+    clearEyeBox(eyeRX, eyeY, LOVE_SCALE_MAX);
+
+    // 2) Draw hearts
     drawHeartAt(eyeLX, eyeY, scale, heartColor);
     drawHeartAt(eyeRX, eyeY, scale, heartColor);
 
-    // Mouth (only repaint mouth box)
+    // 3) Mouth (only repaint mouth box)
     int cx = mouthX + mouthW/2;
     int cy = mouthY + mouthH/2 + 1;
     int r  = mouthW/2 - 3;
@@ -155,10 +181,8 @@ void drawLoveEyesAnimatedRoundHead(){  // keep the same name to avoid changing o
     delay(28); // ~35 FPS
   }
 
-  // Refresh normal face (rectangular head)
-  drawFace(true, false);
+  drawFace(true, false); // restore normal face
 }
-
 
 // Blink state
 unsigned long lastBlink=0;
@@ -172,13 +196,13 @@ void setup(){
 
   Serial.begin(115200);
 
-  // Bind custom pins to **hardware SPI** (much faster than software SPI)
+  // Bind custom pins to hardware SPI (fast)
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, -1);
 
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(1);
 
-  // Draw a single BG once; we won't use fillScreen() again in transitions
+  // Draw BG once; avoid fillScreen() during transitions
   tft.fillRect(0, 0, W, H, BG);
 
   drawFace(true, false);
@@ -187,7 +211,7 @@ void setup(){
 void loop(){
   unsigned long now = millis();
 
-  // Touch → love mode (round head + pulsing hearts)
+  // Touch → love mode (rect head + pulsing hearts)
   if (digitalRead(TOUCH_PIN) == HIGH){
     drawLoveEyesAnimatedRoundHead();
     return; // skip blink during love animation
