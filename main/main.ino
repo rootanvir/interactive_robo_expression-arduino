@@ -32,9 +32,11 @@ const int16_t headX=8, headY=8, headW=W-16, headH=H-16, headR=14;
 // Eyes (big)
 const int16_t eyeY=48, eyeLX=48, eyeRX=112, eyeR=18, pupilR=9;
 
-// Mouth geometry
-const int16_t mouthX=50, mouthY=70, mouthW=60, mouthH=5, mouthR=5;
-// Max mouth thickness used anywhere (smile/love/fear)
+// --- Mouth geometry ---
+// Keep the same arc width/shape, but use a lower Y only for the normal face.
+const int16_t mouthX=50, mouthW=60, mouthH=5, mouthR=5;
+const int16_t mouthY_ANIM = 80;   // used in love/fear animations (unchanged)
+const int16_t mouthY_OK   = 78;   // a little lower for the normal/OK face
 const int16_t MOUTH_THICK_MAX = 5;
 
 // Happy by default (∪). If you want frown (∩), set to true.
@@ -47,6 +49,11 @@ const int LOVE_SCALE_MAX = 10;  // <=10 fits eyeR=18 safely
 // Debounce for vibration
 const unsigned long VIB_COOLDOWN_MS = 700;
 unsigned long lastVibMs = 0;
+
+// ====== X-eye tuning ======
+const uint8_t XEYE_THICK     = 5;   // stroke thickness
+const int     XEYE_EXTEND_X  = 6;   // widen X horizontally
+const int     XEYE_EXTEND_Y  = -2;  // reduce vertical length (negative = shorter Y)
 
 // ---------- Helpers ----------
 static inline void drawArc(int16_t cx,int16_t cy,int16_t radius,int16_t thickness,
@@ -77,7 +84,7 @@ void clearHeadArea(){
   if (w > 0 && h > 0) tft.fillRect(x, y, w, h, BG);
 }
 
-// Eye region clear box (big enough for max heart or eye redraw)
+// Eye region clear box (big enough for max heart / X-eye)
 void clearEyeBox(int16_t cx, int16_t cy, int M){
   int16_t L  = cx - (2*M + 2);
   int16_t T  = cy - ((3*M)/2 + 2);
@@ -92,20 +99,11 @@ void clearEyeBox(int16_t cx, int16_t cy, int M){
   if (Wb > 0 && Hb > 0) tft.fillRect(L, T, Wb, Hb, FACE);
 }
 
-// Brow band (for clearing before redrawing brows)
-void clearBrowBand(){
-  int16_t top = eyeY - eyeR - 26;
-  int16_t height = 18;
-  if (top < headY+2) { height -= (headY+2 - top); top = headY+2; }
-  int16_t left  = headX+2;
-  int16_t right = headX + headW - 2;
-  if (height > 0) tft.fillRect(left, top, right - left, height, FACE);
-}
-
 // Full mouth clear that covers the *entire* smile arc and fear "O"
-void clearMouthArea(){
+// Parameterized by mouth Y so we can clear the correct row.
+void clearMouthAreaAt(int16_t mouthYParam){
   const int cx = mouthX + mouthW/2;
-  const int cy = mouthY + mouthH/2;
+  const int cy = mouthYParam + mouthH/2;
   const int r  = mouthW/2 - 4;               // same radius used in smile()
   const int thick = MOUTH_THICK_MAX;          // worst-case thickness
   int16_t left   = mouthX - 4;
@@ -144,11 +142,11 @@ void drawHeadRound(){
 }
 
 // Features
-void drawSmile(uint16_t color){
-  clearMouthArea();  // <<< full-area clear (prevents old arcs from lingering)
+void drawSmileAt(int16_t mouthYParam, uint16_t color){
+  clearMouthAreaAt(mouthYParam);
 
   const int cx = mouthX + mouthW/2;
-  const int cy = mouthY + mouthH/2;
+  const int cy = mouthYParam + mouthH/2;
   const int r  = mouthW/2 - 4;
 
   // TFT Y grows downward → happy (∪) is 20..160; frown (∩) is 200..340
@@ -166,7 +164,6 @@ void drawSmile(uint16_t color){
 }
 
 void drawEye(int16_t cx,int16_t cy,bool open){
-  // avoid std::max type mismatch: cast to int
   int clearM = ((int)eyeR > LOVE_SCALE_MAX) ? (int)eyeR : LOVE_SCALE_MAX;
   clearEyeBox(cx, cy, clearM);
 
@@ -184,7 +181,8 @@ void drawFace(bool eyesOpen, bool roundHead){
   if (roundHead) drawHeadRound(); else drawHeadRect();
   drawEye(eyeLX, eyeY, eyesOpen);
   drawEye(eyeRX, eyeY, eyesOpen);
-  drawSmile(MOUTH);
+  // Normal/OK smile is a bit lower now:
+  drawSmileAt(mouthY_OK, MOUTH);
 }
 
 // ---------- Love-eyes helpers ----------
@@ -202,67 +200,78 @@ void drawLoveEyesAnimatedRoundHead(){  // keeps rectangular head
   const uint16_t heartColor = ST77XX_RED;
   unsigned long start = millis();
 
-  // Draw rect head once; then update only eyes/mouth regions
-  drawHeadRect();
+  drawHeadRect(); // draw once
 
   while (millis() - start < 4000UL){
     float t = (millis() - start) / 200.0f;
-
-    // Smooth pulse in [LOVE_SCALE_MIN .. LOVE_SCALE_MAX]
     float u = (sinf(t) * 0.5f) + 0.5f;  // 0..1
     int scale = LOVE_SCALE_MIN + (int)(u * (LOVE_SCALE_MAX - LOVE_SCALE_MIN) + 0.5f);
 
-    // Clear eye boxes for the largest heart every frame (no trails)
+    // Eyes
     clearEyeBox(eyeLX, eyeY, LOVE_SCALE_MAX);
     clearEyeBox(eyeRX, eyeY, LOVE_SCALE_MAX);
-
-    // Draw hearts
     drawHeartAt(eyeLX, eyeY, scale, heartColor);
     drawHeartAt(eyeRX, eyeY, scale, heartColor);
 
-    // Mouth (use full-area clear so smile artifacts never remain)
+    // Mouth (use animation row, unchanged)
     int cx = mouthX + mouthW/2;
-    int cy = mouthY + mouthH/2 + 1;
+    int cy = mouthY_ANIM + mouthH/2 + 1;
     int r  = mouthW/2 - 3;
     int thick = 2 + (int)((sinf(t) + 1.0f) * 1.5f); // 2..5
-    clearMouthArea();
+    clearMouthAreaAt(mouthY_ANIM);
     drawArc(cx, cy, r, thick, 20, 160, MOUTH); // happy ∪
 
     delay(28); // ~35 FPS
   }
 
-  // Hard refresh of head area to ensure nothing remains
   drawFace(true, false);
 }
 
-// ---------- Fear (scared) expression ----------
-void drawScaredBrows(){
-  // raised / slanted brows above eyes
-  tft.drawLine(eyeLX - 10, eyeY - 18, eyeLX + 6,  eyeY - 22, EYE);
-  tft.drawLine(eyeRX - 6,  eyeY - 22, eyeRX + 10, eyeY - 18, EYE);
+// ====== Proper thick, wide diagonals for X-eye ======
+void drawThickLineWide(int x0, int y0, int x1, int y1, uint8_t thick, uint16_t color){
+  int dx = x1 - x0;
+  int dy = y1 - y0;
+  int adx = abs(dx), ady = abs(dy);
+  int denom = (adx > ady) ? adx : ady;   // approximate normalization
+  if (denom == 0) denom = 1;
+
+  // perpendicular (nx, ny) ~ (-dy, dx) / denom
+  for (int k = -(int)thick/2; k <= (int)thick/2; ++k){
+    int offx = (-dy * k) / denom;
+    int offy = ( dx * k) / denom;
+    tft.drawLine(x0 + offx, y0 + offy, x1 + offx, y1 + offy, color);
+  }
 }
 
+void drawXEyeWide(int16_t cx, int16_t cy, int16_t baseR, uint16_t color, uint8_t thick){
+  // Make the X wider: extend X horizontally (rx) and adjust vertical (ry)
+  int rx = baseR + XEYE_EXTEND_X;                // half-length in X (wider)
+  int ry = baseR + XEYE_EXTEND_Y;                // half-length in Y (can be shorter)
+  if (ry < 6) ry = 6;                             // keep reasonable height
+
+  // Diagonal 1: \  from (cx - rx, cy - ry) to (cx + rx, cy + ry)
+  drawThickLineWide(cx - rx, cy - ry, cx + rx, cy + ry, thick, color);
+  // Diagonal 2: /  from (cx - rx, cy + ry) to (cx + rx, cy - ry)
+  drawThickLineWide(cx - rx, cy + ry, cx + rx, cy - ry, thick, color);
+}
+
+// ---------- Fear (scared) expression with wide X X eyes (NO eyebrows) ----------
 void showScaredExpression(uint16_t duration_ms){
   unsigned long start = millis();
 
   while (millis() - start < duration_ms){
-    // Clear regions first (prevents ghosting)
-    clearEyeBox(eyeLX, eyeY, eyeR);
-    clearEyeBox(eyeRX, eyeY, eyeR);
-    clearBrowBand();
-    clearMouthArea();  // <<< full-area clear ensures no half-moon remains
+    // Clear regions (no ghosting). Use bigger M for wide X.
+    int Mclear = eyeR + XEYE_EXTEND_X + XEYE_THICK + 2; // generous box
+    clearEyeBox(eyeLX, eyeY, Mclear);
+    clearEyeBox(eyeRX, eyeY, Mclear);
+    clearMouthAreaAt(mouthY_ANIM);
 
-    // eyes: big whites + tiny pupils (slightly up for "shock")
-    tft.fillCircle(eyeLX, eyeY, eyeR, EYE);
-    tft.fillCircle(eyeRX, eyeY, eyeR, EYE);
-    tft.fillCircle(eyeLX, eyeY - 3, 4, PUPIL);
-    tft.fillCircle(eyeRX, eyeY - 3, 4, PUPIL);
+    // Wide X X eyes (no eyebrows drawn)
+    drawXEyeWide(eyeLX, eyeY, eyeR - 2, EYE, XEYE_THICK);
+    drawXEyeWide(eyeRX, eyeY, eyeR - 2, EYE, XEYE_THICK);
 
-    // brows
-    drawScaredBrows();
-
-    // mouth "O" (ring)
-    drawArc(mouthX + mouthW/2, mouthY + mouthH/2 + 1, 6, 3, 0, 359, MOUTH);
+    // round "O" mouth on animation row
+    drawArc(mouthX + mouthW/2, mouthY_ANIM + mouthH/2 + 1, 6, 3, 0, 359, MOUTH);
 
     delay(40);
   }
@@ -300,7 +309,7 @@ void setup(){
 void loop(){
   unsigned long now = millis();
 
-  // 🔔 Vibration → FEAR expression (debounced)
+  // 🔔 Vibration → FEAR expression (with wide X X eyes, NO eyebrows)
   if (digitalRead(VIB_PIN) == HIGH && (now - lastVibMs) > VIB_COOLDOWN_MS){
     lastVibMs = now;
     showScaredExpression(1200);   // ~1.2s scared look
@@ -330,7 +339,6 @@ void loop(){
     drawEye(eyeLX, eyeY, true);
     drawEye(eyeRX, eyeY, true);
     blinkPhase = 0;
-    lastBlink = now;
   }
 
   delay(10);
