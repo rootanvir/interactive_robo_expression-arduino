@@ -1,3 +1,6 @@
+![My GIF](assets/robo.gif)
+
+
 ## Wiring
 
 * **Display → ESP32-S3**
